@@ -151,7 +151,7 @@ def register():
     return page("Регистрация", """<section class="card"><h1>Регистрация</h1><form method="post">
 <label>Логин</label><input name="username" required minlength="3">
 <label>Email</label><input name="email" type="email" required>
-<label>Пароль (минимум 8 символов)</label><input name="password" type="password" required minlength="8>
+<label>Пароль (минимум 8 символов)</label><input name="password" type="password" required minlength="8">
 <button>Зарегистрироваться</button></form></section>""")
 
 @app.route("/login", methods=["GET","POST"])
