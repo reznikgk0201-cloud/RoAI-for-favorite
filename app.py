@@ -96,7 +96,36 @@ def admin_required(fn):
     return wrapped
 
 @app.get("/")
+
+@app.get("/")
 def home():
+    with db() as c:
+        news = c.execute(
+            "SELECT * FROM news ORDER BY id DESC"
+        ).fetchall()
+
+    news_html = ""
+    for item in news:
+        news_html += f"""
+        <section class="card">
+            <h2>{item['title']}</h2>
+            <p>{item['body']}</p>
+            <p class="small">{item['created_at']}</p>
+        </section>
+        """
+
+    if not news_html:
+        news_html = '<section class="card">Пока новостей нет.</section>'
+
+    return page("Главная", f"""
+        <section class="card">
+            <h1>Ro AI for favorite</h1>
+            <p>Твоя AI-платформа!</p>
+        </section>
+        <h2>Новости Ro AI</h2>
+        {news_html}
+    """)
+
     return page("Главная", """<section class="card"><h1>Твоя AI-платформа</h1>
 <p>Добро пожаловать в Ro AI for favorite!</p><p class="small">Создавай, исследуй и следи за новостями проекта.</p>
 <a href="/register"><button>Создать аккаунт</button></a></section>
