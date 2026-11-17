@@ -56,6 +56,15 @@ def init_db():
             if not row:
                 c.execute("INSERT INTO users(username,email,password_hash,role) VALUES(?,?,?,?)",
                           (ADMIN_USERNAME, ADMIN_EMAIL.lower(), pw_hash(ADMIN_PASSWORD), "admin"))
+                c.execute("""
+CREATE TABLE IF NOT EXISTS promo_redemptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    promo_id INTEGER NOT NULL,
+    redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, promo_id)
+)
+""")
 
 init_db()
 
@@ -103,6 +112,172 @@ def admin_required(fn):
         if not u or u["role"]!="admin": abort(403)
         return fn(*a, **kw)
     return wrapped
+
+
+@app.route("/admin", methods=["GET", "POST"])
+@admin_required
+def admin():
+    from markupsafe import escape
+
+    with db() as c:
+        if request.method == "POST":
+            action = request.form.get("action")
+
+            if action == "promo":
+                code = request.form.get("code", "").strip().upper()
+                reward = request.form.get("reward_text", "").strip()
+
+                try:
+                    limit = max(1, int(request.form.get("limit", "1")))
+
+                    if not code or not reward:
+                        raise ValueError()
+
+                    c.execute(
+                        """INSERT INTO promo_codes
+                        (code, max_uses, reward_text)
+                        VALUES (?, ?, ?)""",
+                        (code, limit, reward)
+                    )
+                    flash("Промокод создан!")
+
+                except Exception:
+                    flash("Не удалось создать промокод.")
+
+            elif action == "toggle":
+                c.execute(
+                    "UPDATE users SET blocked=1-blocked WHERE id=?",
+                    (request.form.get("user_id"),)
+                )
+                flash("Статус пользователя изменён.")
+
+            elif action == "news":
+                c.execute(
+                    "INSERT INTO news(title,body) VALUES(?,?)",
+                    (
+                        request.form.get("title", ""),
+                        request.form.get("body", "")
+                    )
+                )
+                flash("Новость опубликована.")
+
+        users = c.execute(
+            """SELECT id, username, email, role, blocked
+            FROM users ORDER BY id"""
+        ).fetchall()
+
+        promos = c.execute(
+            "SELECT * FROM promo_codes ORDER BY id DESC"
+        ).fetchall()
+
+        redemptions = c.execute("""
+            SELECT users.username, promo_codes.code,
+                   promo_redemptions.redeemed_at
+            FROM promo_redemptions
+            JOIN users ON users.id = promo_redemptions.user_id
+            JOIN promo_codes ON promo_codes.id = promo_redemptions.promo_id
+            ORDER BY promo_redemptions.id DESC
+        """).fetchall()
+
+    user_rows = "".join(
+        f"""<tr>
+        <td>{escape(u['username'])}</td>
+        <td>{escape(u['email'])}</td>
+        <td>{escape(u['role'])}</td>
+        <td>{'Заблокирован' if u['blocked'] else 'Активен'}</td>
+        <td>
+            <form method="post">
+                <input type="hidden" name="action" value="toggle">
+                <input type="hidden" name="user_id" value="{u['id']}">
+                <button>Изменить статус</button>
+            </form>
+        </td>
+        </tr>"""
+        for u in users
+    )
+
+    promo_rows = "".join(
+        f"""<tr>
+        <td>{escape(p['code'])}</td>
+        <td>{p['uses']} / {p['max_uses']}</td>
+        <td>{'Вкл.' if p['active'] else 'Выкл.'}</td>
+        </tr>"""
+        for p in promos
+    )
+
+    history_rows = "".join(
+        f"""<tr>
+        <td>{escape(r['username'])}</td>
+        <td>{escape(r['code'])}</td>
+        <td>{escape(r['redeemed_at'])}</td>
+        </tr>"""
+        for r in redemptions
+    )
+
+    return page("Админ-панель", f"""
+    <h1>Админ-панель Ro AI</h1>
+
+    <section class="card">
+        <h2>Пользователи</h2>
+        <table>
+            <tr>
+                <th>Логин</th><th>Email</th>
+                <th>Роль</th><th>Статус</th><th></th>
+            </tr>
+            {user_rows}
+        </table>
+    </section>
+
+    <section class="card">
+        <h2>Создать промокод</h2>
+        <form method="post">
+            <input type="hidden" name="action" value="promo">
+
+            <label>Название промокода</label>
+            <input name="code" placeholder="ROAI2026" required>
+
+            <label>Лимит активаций</label>
+            <input name="limit" type="number" min="1"
+                   value="10" required>
+
+            <label>Награда</label>
+            <textarea name="reward_text"
+                      placeholder="Что получит пользователь?"
+                      required></textarea>
+
+            <button>Создать промокод</button>
+        </form>
+
+        <h3>Созданные промокоды</h3>
+        <table>
+            <tr><th>Код</th><th>Использовано</th><th>Статус</th></tr>
+            {promo_rows}
+        </table>
+    </section>
+
+    <section class="card">
+        <h2>История активаций</h2>
+        <table>
+            <tr>
+                <th>Пользователь</th>
+                <th>Промокод</th>
+                <th>Дата</th>
+            </tr>
+            {history_rows}
+        </table>
+    </section>
+
+    <section class="card">
+        <h2>Опубликовать новость</h2>
+        <form method="post">
+            <input type="hidden" name="action" value="news">
+            <input name="title" placeholder="Заголовок" required>
+            <textarea name="body" placeholder="Текст новости" required></textarea>
+            <button>Опубликовать</button>
+        </form>
+    </section>
+    """)
+
 
 @app.get("/")
 
@@ -195,7 +370,8 @@ def generate():
     return page("Генерация", """<section class="card"><h1>Генерация</h1>
 <h2>СКОРО</h2><p>Раздел генерации появится позже.</p></section>""")
 
-@app.route("/promocodes", methods=["GET","POST"])
+
+@app.route("/promocodes", methods=["GET", "POST"])
 @login_required
 def promocodes():
     from markupsafe import escape
@@ -212,157 +388,68 @@ def promocodes():
                 (code,)
             ).fetchone()
 
-            if p and p["uses"] < p["max_uses"]:
-                c.execute(
-                    "UPDATE promo_codes SET uses=uses+1 WHERE id=?",
-                    (p["id"],)
-                )
-
-                reward = escape(p["reward_text"])
-
-                modal = f"""
-                <div class="card" style="
-                    position:relative;
-                    border:2px solid #78df91;
-                    text-align:center;
-                    padding:35px;
-                    margin-top:25px;
-                ">
-                    <h1 style="color:#78df91;">🎉 ТЫ ВЫИГРАЛ!</h1>
-                    <h2>Поздравляем!</h2>
-                    <p style="font-size:20px;">{reward}</p>
-                    <button onclick="this.parentElement.remove()">
-                        Здорово!
-                    </button>
-                </div>
-                """
+            if not p:
+                message = "Промокод недействителен."
+            elif p["uses"] >= p["max_uses"]:
+                message = "Лимит активаций исчерпан."
             else:
-                message = "Промокод недействителен или лимит активаций исчерпан."
+                try:
+                    c.execute(
+                        """INSERT INTO promo_redemptions
+                        (user_id, promo_id) VALUES (?, ?)""",
+                        (session["uid"], p["id"])
+                    )
+
+                    result = c.execute(
+                        """UPDATE promo_codes
+                        SET uses=uses+1
+                        WHERE id=? AND active=1 AND uses<max_uses""",
+                        (p["id"],)
+                    )
+
+                    if result.rowcount == 0:
+                        c.execute(
+                            """DELETE FROM promo_redemptions
+                            WHERE user_id=? AND promo_id=?""",
+                            (session["uid"], p["id"])
+                        )
+                        message = "Лимит активаций исчерпан."
+                    else:
+                        reward = escape(p["reward_text"])
+
+                        modal = f"""
+                        <div class="card" style="
+                            border:2px solid #78df91;
+                            text-align:center;
+                            padding:35px;
+                            margin-top:25px;
+                        ">
+                            <h1 style="color:#78df91;">
+                                🎉 ТЫ ВЫИГРАЛ!
+                            </h1>
+                            <h2>Поздравляем!</h2>
+                            <p style="font-size:20px;">{reward}</p>
+                            <button onclick="this.parentElement.remove()">
+                                Здорово!
+                            </button>
+                        </div>
+                        """
+
+                except sqlite3.IntegrityError:
+                    message = "Ты уже активировал этот промокод!"
 
     return page("Промокоды", f"""
     <section class="card">
         <h1>Промокоды</h1>
         <p>{escape(message)}</p>
         <form method="post">
-            <input name="code" placeholder="Введи промокод" required>
+            <input name="code"
+                   placeholder="Введи промокод"
+                   required>
             <button>Активировать</button>
         </form>
     </section>
     {modal}
-    """)
-
-@app.route("/admin", methods=["GET","POST"])
-@admin_required
-def admin():
-    with db() as c:
-        if request.method == "POST":
-            action = request.form.get("action")
-
-            if action == "promo":
-                code = request.form.get("code", "").strip().upper()
-                reward = request.form.get("reward_text", "").strip()
-
-                try:
-                    limit = max(1, int(request.form.get("limit", "1")))
-                    if not code or not reward:
-                        raise ValueError()
-
-                    c.execute(
-                        "INSERT INTO promo_codes(code,max_uses,reward_text) VALUES(?,?,?)",
-                        (code, limit, reward)
-                    )
-                    flash("Промокод создан!")
-                except Exception:
-                    flash("Не удалось создать промокод. Проверь код и лимит.")
-
-            elif action == "news":
-                c.execute(
-                    "INSERT INTO news(title,body) VALUES(?,?)",
-                    (request.form.get("title", ""), request.form.get("body", ""))
-                )
-                flash("Новость опубликована.")
-
-            elif action == "toggle":
-                c.execute(
-                    "UPDATE users SET blocked=1-blocked WHERE id=?",
-                    (request.form.get("user_id"),)
-                )
-                flash("Статус пользователя изменён.")
-
-        users = c.execute(
-            "SELECT id,username,email,role,blocked FROM users ORDER BY id"
-        ).fetchall()
-
-        promos = c.execute(
-            "SELECT * FROM promo_codes ORDER BY id DESC"
-        ).fetchall()
-
-    user_rows = "".join(
-        f"""<tr>
-        <td>{u['username']}</td>
-        <td>{u['email']}</td>
-        <td>{u['role']}</td>
-        <td>{'Заблокирован' if u['blocked'] else 'Активен'}</td>
-        <td>
-        <form method="post">
-        <input type="hidden" name="action" value="toggle">
-        <input type="hidden" name="user_id" value="{u['id']}">
-        <button>Изменить статус</button>
-        </form>
-        </td></tr>"""
-        for u in users
-    )
-
-    promo_rows = "".join(
-        f"<tr><td>{p['code']}</td><td>{p['uses']} / {p['max_uses']}</td>"
-        f"<td>{'Вкл.' if p['active'] else 'Выкл.'}</td></tr>"
-        for p in promos
-    )
-
-    return page("Админ-панель", f"""
-    <h1>Админ-панель</h1>
-
-    <section class="card">
-    <h2>Пользователи</h2>
-    <table>
-    <tr><th>Логин</th><th>Email</th><th>Роль</th><th>Статус</th><th></th></tr>
-    {user_rows}
-    </table>
-    </section>
-
-    <section class="card">
-    <h2>Создать промокод</h2>
-    <form method="post">
-    <input type="hidden" name="action" value="promo">
-
-    <label>Название промокода</label>
-    <input name="code" placeholder="Например ROAI2026" required>
-
-    <label>Лимит активаций</label>
-    <input name="limit" type="number" min="1" value="10" required>
-
-    <label>Что выиграл пользователь?</label>
-    <textarea name="reward_text" placeholder="Напиши здесь награду или поздравление..." required></textarea>
-
-    <button>Создать промокод</button>
-    </form>
-
-    <h3>Созданные промокоды</h3>
-    <table>
-    <tr><th>Код</th><th>Использовано</th><th>Статус</th></tr>
-    {promo_rows}
-    </table>
-    </section>
-
-    <section class="card">
-    <h2>Опубликовать новость</h2>
-    <form method="post">
-    <input type="hidden" name="action" value="news">
-    <input name="title" placeholder="Заголовок" required>
-    <textarea name="body" placeholder="Текст новости" required></textarea>
-    <button>Опубликовать</button>
-    </form>
-    </section>
     """)
 
 if __name__ == "__main__":
